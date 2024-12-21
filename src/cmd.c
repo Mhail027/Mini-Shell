@@ -9,18 +9,100 @@
 
 #include "cmd.h"
 #include "utils.h"
+#include "my_string.h"
 
 #define READ		0
 #define WRITE		1
+
+static int shell_fwrite(const void *buff, size_t size, size_t nitems,int fd) {
+ 	size_t total_bytes = size * nitems;
+ 	size_t total_writen_bytes = 0;
+
+ 	while (total_bytes != total_writen_bytes) {
+ 		size_t remained_bytes = total_bytes - total_writen_bytes;
+ 		size_t written_bytes = write(fd, buff + total_writen_bytes, remained_bytes);
+
+		if (written_bytes < 0)
+			return written_bytes;
+ 		total_writen_bytes += written_bytes;
+ 	}
+
+ 	return total_writen_bytes;
+}
+
+static int run_command(simple_command_t *s, char *params[]) {
+	if (s->in) {
+		int in = open(s->in->string, O_RDONLY | O_CREAT, 0644);
+		if (dup2(in, 0) == -1) {
+			return -1;
+		}
+		close(in);
+	}
+
+	if (s->out) {
+		int out;
+		if (s->io_flags & IO_OUT_APPEND)
+			out = open(s->out->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		else
+			out = open(s->out->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+		if (dup2(out, 1) == -1)
+			return -1;
+		close(out);
+	}
+
+	if (s->err) {
+		if (s->out && !my_strcmp(s->err->string, s->out->string)) {
+			if (dup2(1, 2) == -1)
+				return -1;
+		} else {
+			int err;
+			if (s->io_flags & IO_ERR_APPEND)
+				err = open(s->err->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+			else
+				err = open(s->err->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+			if (dup2(err, 2) == -1)
+				return -1;
+			close(err);
+		}
+	}
+		
+	return execvp(s->verb->string, params);
+}
+
+static int run_external_command(simple_command_t *s) {
+	char *params[1001];
+	int pos = 0;
+	params[pos++] = (char*) s->verb->string;
+	word_t *param = s->params;
+	
+	while (param) {
+		params[pos] = (char*)param->string;
+		pos++;
+		param = param->next_word;
+	}
+	params[pos] = NULL;
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		return run_command(s, params);
+	} else {
+		int status;
+		waitpid(pid, &status, 0);
+		return status;
+	}
+}
 
 /**
  * Internal change-directory command.
  */
 static bool shell_cd(word_t *dir)
 {
-	/* TODO: Execute cd. */
-
 	return 0;
+	//DIE(!dir, "dir can't be null");
+
+	return chdir(dir->string);
 }
 
 /**
@@ -28,9 +110,8 @@ static bool shell_cd(word_t *dir)
  */
 static int shell_exit(void)
 {
-	/* TODO: Execute exit/quit. */
-
-	return 0; /* TODO: Replace with actual exit code. */
+	_exit(0);
+	return 0;
 }
 
 /**
@@ -39,23 +120,19 @@ static int shell_exit(void)
  */
 static int parse_simple(simple_command_t *s, int level, command_t *father)
 {
-	/* TODO: Sanity checks. */
+	if (!s) {
+		char *message = "s can't be null\n";
+		shell_fwrite(message, 1, my_strlen(message), 1);
+	}
 
-	/* TODO: If builtin command, execute the command. */
+	if (!my_strcmp(s->verb->string, "exit"))
+		return shell_exit();
 
 	/* TODO: If variable assignment, execute the assignment and return
 	 * the exit status.
 	 */
 
-	/* TODO: If external command:
-	 *   1. Fork new process
-	 *     2c. Perform redirections in child
-	 *     3c. Load executable in child
-	 *   2. Wait for child
-	 *   3. Return exit status
-	 */
-
-	return 0; /* TODO: Replace with actual exit status. */
+	return run_external_command(s);
 }
 
 /**
@@ -85,12 +162,13 @@ static bool run_on_pipe(command_t *cmd1, command_t *cmd2, int level,
  */
 int parse_command(command_t *c, int level, command_t *father)
 {
-	/* TODO: sanity checks */
+	if (!c) {
+		char *message = "c can't be null\n";
+		shell_fwrite(message, 1, my_strlen(message), 1);
+	}
 
 	if (c->op == OP_NONE) {
-		/* TODO: Execute a simple command. */
-
-		return 0; /* TODO: Replace with actual exit code of command. */
+		return parse_simple(c->scmd, level, father);
 	}
 
 	switch (c->op) {
