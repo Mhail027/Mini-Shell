@@ -3,6 +3,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -12,8 +13,80 @@
 #include "my_string.h"
 #include "my_stdio.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #define READ		0
 #define WRITE		1
+
+static char *get_env_var(const char *name)
+{
+	extern char **environ;
+
+	for (u_int i = 0; environ[i]; ++i) {
+		char match = 1;
+		u_int j = 0;
+		for (; environ[i][j] != '=' && name[j]; j++) {
+			if (environ[i][j] != name[j]) {
+				match = 0;
+				break;
+			}
+		}
+		if (environ[i][j] != '=' || name[j])
+			match = 0;
+
+		if (match)
+			return environ[i] + j + 1;
+	}
+	return "";
+}
+
+static int set_env_var(word_t *verb)
+{
+	if (!verb || !verb->next_part || !verb->next_part->next_part)
+		return -1;
+
+	char *name = (char*) verb->string;
+	char *val;
+	if (verb->next_part->next_part->expand == false)
+		val = (char*) verb->next_part->next_part->string;
+	else
+		val = get_env_var(verb->next_part->next_part->string);
+	size_t length = my_strlen(name) + my_strlen(val) + 2;
+	char *expresion = (char*)mmap(0, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	my_strcat(expresion, name);
+	my_strcat(expresion, "=");
+	my_strcat(expresion, val);
+	expresion[length - 1] = '\0';
+
+	extern char **environ;
+	u_int i = 0;
+	for (; environ[i]; ++i) {
+		char match = 1;
+		u_int j = 0;
+		for (; environ[i][j] != '=' && name[j]; j++) {
+			if (environ[i][j] != name[j]) {
+				match = 0;
+				break;
+			}
+		}
+		if (environ[i][j] != '=' || !name[j])
+			match = 0;
+
+		if (match) {
+			environ[i] = expresion;
+			return 0;
+		}	
+	}
+
+	char **new_environ = (char**)mmap(0, 2 * i * sizeof(char*), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	for (int j = 0; j < i; ++j)
+		new_environ[j] = environ[j];
+	new_environ[i++] = expresion;
+	new_environ[i]=NULL;
+	environ = new_environ;
+	return 0;
+}
 
 static int redirect_input(word_t *in, int *old_in) {
 	if (!in || !in->string) {
@@ -55,7 +128,9 @@ static int redirect_output(word_t *out, int flags, int *old_out) {
 	return 0;
 }
 
-// Before must call redirect_output(),
+/* 
+ *Before must call redirect_output().
+ */
 static int redirect_error(word_t *err, int flags, int *old_err, word_t *out) {
 	if (!err || !err->string) {
 		*old_err = 2;
@@ -122,7 +197,10 @@ static int run_external_command(simple_command_t *s) {
 	word_t *param = s->params;
 	
 	while (param) {
-		params[pos] = (char*)param->string;
+		if (param->expand == false)
+			params[pos] = (char*)param->string;
+		else
+			params[pos] = get_env_var(param->string);
 		pos++;
 		param = param->next_word;
 	}
@@ -174,8 +252,12 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 	if (!s) {
 		char *message = "s can't be null\n";
 		my_fwrite(message, 1, my_strlen(message), 1);
+	} else if (!s->verb) {
+		char *message = "s->message can't be null\n";
+		my_fwrite(message, 1, my_strlen(message), 1);
 	}
 
+	// Built in command.
 	if (!my_strcmp(s->verb->string, "exit"))
 		return shell_exit();
 	else if (!my_strcmp(s->verb->string, "cd")) {
@@ -189,10 +271,12 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 		return status;
 	}
 
-	/* TODO: If variable assignment, execute the assignment and return
-	 * the exit status.
-	 */
+	//Change env variable.
+	if (s->verb->next_part && !my_strcmp(s->verb->next_part->string, "=")) {
+		set_env_var(s->verb);
+	}
 
+	// Command which have executable.
 	return run_external_command(s);
 }
 
@@ -234,24 +318,34 @@ int parse_command(command_t *c, int level, command_t *father)
 
 	switch (c->op) {
 	case OP_SEQUENTIAL:
-		/* TODO: Execute the commands one after the other. */
-		break;
+		/* Execute the commands one after the other. */
+		parse_command(c->cmd1, level + 1, c);
+		parse_command(c->cmd2, level + 1, c);
+		return 0;
 
 	case OP_PARALLEL:
 		/* TODO: Execute the commands simultaneously. */
 		break;
 
 	case OP_CONDITIONAL_NZERO:
-		/* TODO: Execute the second command only if the first one
+		/* Execute the second command only if the first one
 		 * returns non zero.
 		 */
-		break;
+		if (parse_command(c->cmd1, level + 1, c) == 0)
+			return 0;
+		if (parse_command(c->cmd2, level + 1, c) == 0)
+			return 0;
+		return -1;
 
 	case OP_CONDITIONAL_ZERO:
-		/* TODO: Execute the second command only if the first one
+		/* Execute the second command only if the first one
 		 * returns zero.
 		 */
-		break;
+		if (parse_command(c->cmd1, level + 1, c) != 0)
+			return -1;
+		if (parse_command(c->cmd2, level + 1, c) != 0)
+			return -1;
+		return 0;
 
 	case OP_PIPE:
 		/* TODO: Redirect the output of the first command to the
