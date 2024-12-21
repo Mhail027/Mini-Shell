@@ -1,6 +1,6 @@
 #include <sys/types.h>
 
-#include "string.h"
+#include "my_string.h"
 
 size_t my_strlen(const char *s) {
 	size_t cnt = 0;

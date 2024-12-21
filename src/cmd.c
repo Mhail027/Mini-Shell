@@ -10,65 +10,109 @@
 #include "cmd.h"
 #include "utils.h"
 #include "my_string.h"
+#include "my_stdio.h"
 
 #define READ		0
 #define WRITE		1
 
-static int shell_fwrite(const void *buff, size_t size, size_t nitems,int fd) {
- 	size_t total_bytes = size * nitems;
- 	size_t total_writen_bytes = 0;
+static int redirect_input(word_t *in, int *old_in) {
+	if (!in || !in->string) {
+		*old_in = 0;
+		return 0;
+	}
 
- 	while (total_bytes != total_writen_bytes) {
- 		size_t remained_bytes = total_bytes - total_writen_bytes;
- 		size_t written_bytes = write(fd, buff + total_writen_bytes, remained_bytes);
+	*old_in = dup(0);
+	if (*old_in == -1)
+		return -1;
 
-		if (written_bytes < 0)
-			return written_bytes;
- 		total_writen_bytes += written_bytes;
- 	}
+	int in_fd = open(in->string, O_RDONLY | O_CREAT, 0644);
+	if (dup2(in_fd, 0) == -1)
+		return -1;
+	close(in_fd);
 
- 	return total_writen_bytes;
+	return 0;
 }
 
-static int run_command(simple_command_t *s, char *params[]) {
-	if (s->in) {
-		int in = open(s->in->string, O_RDONLY | O_CREAT, 0644);
-		if (dup2(in, 0) == -1) {
-			return -1;
-		}
-		close(in);
+static int redirect_output(word_t *out, int flags, int *old_out) {
+	if (!out || !out->string) {
+		*old_out = 1;
+		return 0;
 	}
 
-	if (s->out) {
-		int out;
-		if (s->io_flags & IO_OUT_APPEND)
-			out = open(s->out->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	*old_out = dup(1);
+	if (*old_out == -1)
+		return -1;
+
+	int out_fd;
+	if (flags & IO_OUT_APPEND)
+		out_fd = open(out->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	else
+		out_fd = open(out->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (dup2(out_fd, 1) == -1)
+		return -1;
+	close(out_fd);
+
+	return 0;
+}
+
+// Before must call redirect_output(),
+static int redirect_error(word_t *err, int flags, int *old_err, word_t *out) {
+	if (!err || !err->string) {
+		*old_err = 2;
+		return 0;
+	}
+
+	*old_err = dup(2);
+	if (*old_err == -1)
+		return -1;
+
+	if (out && !my_strcmp(err->string, out->string)) {
+		if (dup2(1, 2) == -1)
+			return -1;
+	} else {
+		int err_fd;
+		if (flags & IO_ERR_APPEND)
+			err_fd = open(err->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
 		else
-			out = open(s->out->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			err_fd = open(err->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (dup2(err_fd, 2) == -1)
+				return -1;
+		close(err_fd);
+	}
 
-		if (dup2(out, 1) == -1)
+	return 0;
+}
+
+static int solve_redirections(simple_command_t *s, int *old_in, int *old_out, int *old_err) {
+	if (redirect_input(s->in, old_in) == -1)
+		return -1;
+	if (redirect_output(s->out, s->io_flags, old_out) == -1)
+		return -1;
+	if (redirect_error(s->err, s->io_flags, old_err, s->out) == -1)
+		return -1;
+	return 0;
+}
+
+static int cancel_redirections(int old_in, int old_out, int old_err) {
+	if (old_in != 0) {
+		if (dup2(old_in, 0) == -1)
 			return -1;
-		close(out);
+		close(old_in);
 	}
 
-	if (s->err) {
-		if (s->out && !my_strcmp(s->err->string, s->out->string)) {
-			if (dup2(1, 2) == -1)
-				return -1;
-		} else {
-			int err;
-			if (s->io_flags & IO_ERR_APPEND)
-				err = open(s->err->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
-			else
-				err = open(s->err->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-
-			if (dup2(err, 2) == -1)
-				return -1;
-			close(err);
-		}
+	if (old_out != 1) {
+		if (dup2(old_out, 1) == -1)
+			return -1;
+		close(old_out);
 	}
-		
-	return execvp(s->verb->string, params);
+
+	if (old_err != 2) {
+		if (dup2(old_err, 2) == -1)
+			return -1;
+		close(old_err);
+	}
+
+	return 0;
 }
 
 static int run_external_command(simple_command_t *s) {
@@ -86,7 +130,10 @@ static int run_external_command(simple_command_t *s) {
 
 	pid_t pid = fork();
 	if (pid == 0) {
-		return run_command(s, params);
+		int old_in, old_out, old_err;
+		if (solve_redirections(s, &old_in, &old_out, &old_err) == -1)
+			return -1;
+		return execvp(params[0], params);
 	} else {
 		int status;
 		waitpid(pid, &status, 0);
@@ -97,12 +144,16 @@ static int run_external_command(simple_command_t *s) {
 /**
  * Internal change-directory command.
  */
-static bool shell_cd(word_t *dir)
+static int shell_cd(word_t *dir)
 {
-	return 0;
-	//DIE(!dir, "dir can't be null");
+	if (!dir || !dir->string || dir->next_word)
+		return -1;
 
-	return chdir(dir->string);
+	int err = chdir(dir->string);
+	if (err)
+		return -1;
+
+	return 0;
 }
 
 /**
@@ -122,11 +173,21 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 {
 	if (!s) {
 		char *message = "s can't be null\n";
-		shell_fwrite(message, 1, my_strlen(message), 1);
+		my_fwrite(message, 1, my_strlen(message), 1);
 	}
 
 	if (!my_strcmp(s->verb->string, "exit"))
 		return shell_exit();
+	else if (!my_strcmp(s->verb->string, "cd")) {
+		int old_in, old_out, old_err;
+		if (solve_redirections(s, &old_in, &old_out, &old_err) == -1)
+			return -1;
+
+		int status = shell_cd(s->params);
+		if (cancel_redirections(old_in, old_out, old_err) == -1)
+			return -1;
+		return status;
+	}
 
 	/* TODO: If variable assignment, execute the assignment and return
 	 * the exit status.
@@ -164,7 +225,7 @@ int parse_command(command_t *c, int level, command_t *father)
 {
 	if (!c) {
 		char *message = "c can't be null\n";
-		shell_fwrite(message, 1, my_strlen(message), 1);
+		my_fwrite(message, 1, my_strlen(message), 1);
 	}
 
 	if (c->op == OP_NONE) {
