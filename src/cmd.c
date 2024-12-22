@@ -13,19 +13,21 @@
 #include "my_string.h"
 #include "my_stdio.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-
 #define READ		0
 #define WRITE		1
 
 static char *get_env_var(const char *name)
 {
-	extern char **environ;
+	if (!name) {
+		char *message = "name can't be null";
+		my_fwrite(message, 1, my_strlen(message), 1);
+	}
 
+	extern char **environ;
 	for (u_int i = 0; environ[i]; ++i) {
 		char match = 1;
 		u_int j = 0;
+
 		for (; environ[i][j] != '=' && name[j]; j++) {
 			if (environ[i][j] != name[j]) {
 				match = 0;
@@ -45,44 +47,58 @@ static int set_env_var(word_t *verb)
 {
 	if (!verb || !verb->next_part || !verb->next_part->next_part)
 		return -1;
+	
+	char *env_var = NULL;
+	char *name = NULL;
+	size_t total_length = 0;
+	while (verb) {
+		char *string;
+		if (verb->expand == false)
+			string = (char*) verb->string;
+		else
+			string = get_env_var(verb->string);
 
-	char *name = (char*) verb->string;
-	char *val;
-	if (verb->next_part->next_part->expand == false)
-		val = (char*) verb->next_part->next_part->string;
-	else
-		val = get_env_var(verb->next_part->next_part->string);
-	size_t length = my_strlen(name) + my_strlen(val) + 2;
-	char *expresion = (char*)mmap(0, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-	my_strcat(expresion, name);
-	my_strcat(expresion, "=");
-	my_strcat(expresion, val);
-	expresion[length - 1] = '\0';
+		if (!name)
+			name = string;
 
+		size_t new_total_length = total_length + my_strlen(string) + 1;
+		char *new_env_var = (char*)mmap(0, new_total_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+		if (env_var)
+			my_strcpy(new_env_var, env_var);
+		my_strcat(new_env_var, string);
+
+		env_var = new_env_var;
+		total_length = new_total_length;
+		verb = verb->next_part;
+	}
+
+	// Chcek if the variable exist already.
 	extern char **environ;
 	u_int i = 0;
 	for (; environ[i]; ++i) {
 		char match = 1;
 		u_int j = 0;
+
 		for (; environ[i][j] != '=' && name[j]; j++) {
 			if (environ[i][j] != name[j]) {
 				match = 0;
 				break;
 			}
 		}
-		if (environ[i][j] != '=' || !name[j])
+		if (environ[i][j] != '=' || name[j])
 			match = 0;
 
 		if (match) {
-			environ[i] = expresion;
+			environ[i] = env_var;
 			return 0;
 		}	
 	}
 
-	char **new_environ = (char**)mmap(0, 2 * i * sizeof(char*), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	// Add new variable.
+	char **new_environ =(char**)mmap(0, (i + 2) * sizeof(char*), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
 	for (int j = 0; j < i; ++j)
 		new_environ[j] = environ[j];
-	new_environ[i++] = expresion;
+	new_environ[i++] = env_var;
 	new_environ[i]=NULL;
 	environ = new_environ;
 	return 0;
@@ -98,7 +114,7 @@ static int redirect_input(word_t *in, int *old_in) {
 	if (*old_in == -1)
 		return -1;
 
-	int in_fd = open(in->string, O_RDONLY | O_CREAT, 0644);
+	int in_fd = open(in->string, O_RDONLY | O_CREAT, 0744);
 	if (dup2(in_fd, 0) == -1)
 		return -1;
 	close(in_fd);
@@ -118,9 +134,9 @@ static int redirect_output(word_t *out, int flags, int *old_out) {
 
 	int out_fd;
 	if (flags & IO_OUT_APPEND)
-		out_fd = open(out->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		out_fd = open(out->string, O_WRONLY | O_CREAT | O_APPEND, 0744);
 	else
-		out_fd = open(out->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		out_fd = open(out->string, O_WRONLY | O_CREAT | O_TRUNC, 0744);
 	if (dup2(out_fd, 1) == -1)
 		return -1;
 	close(out_fd);
@@ -147,9 +163,9 @@ static int redirect_error(word_t *err, int flags, int *old_err, word_t *out) {
 	} else {
 		int err_fd;
 		if (flags & IO_ERR_APPEND)
-			err_fd = open(err->string, O_WRONLY | O_CREAT | O_APPEND, 0644);
+			err_fd = open(err->string, O_WRONLY | O_CREAT | O_APPEND, 0744);
 		else
-			err_fd = open(err->string, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			err_fd = open(err->string, O_WRONLY | O_CREAT | O_TRUNC, 0744);
 		if (dup2(err_fd, 2) == -1)
 				return -1;
 		close(err_fd);
@@ -206,12 +222,12 @@ static int run_external_command(simple_command_t *s) {
 	}
 	params[pos] = NULL;
 
-	pid_t pid = fork();
-	if (pid == 0) {
+	 pid_t pid = fork();
+	 if (pid == 0) {
 		int old_in, old_out, old_err;
 		if (solve_redirections(s, &old_in, &old_out, &old_err) == -1)
 			return -1;
-		return execvp(params[0], params);
+		return execvp(s->verb->string, params);
 	} else {
 		int status;
 		waitpid(pid, &status, 0);
@@ -274,6 +290,7 @@ static int parse_simple(simple_command_t *s, int level, command_t *father)
 	//Change env variable.
 	if (s->verb->next_part && !my_strcmp(s->verb->next_part->string, "=")) {
 		set_env_var(s->verb);
+		return 0;
 	}
 
 	// Command which have executable.
