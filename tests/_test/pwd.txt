@@ -1,1 +1,1 @@
-> 
+/home/necula-mihail/Desktop/Anul2/Semestrul1/SO/assignment-mini-shell/tests/_test
