@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: BSD-3-Clause */
+
 #ifndef _MY_STRING_H
 #define _MY_STRING_H
 

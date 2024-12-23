@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: BSD-3-Clause
+
 #include <sys/types.h>
 #include <unistd.h>
 
 #include "my_stdio.h"
 
-int my_fwrite(const void *buff, size_t size, size_t nitems,int fd) {
+int my_fwrite(const void *buff, size_t size, size_t nitems, int fd)
+{
 	size_t total_bytes = size * nitems;
 	size_t total_writen_bytes = 0;
 
